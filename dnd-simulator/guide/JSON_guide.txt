@@ -1,0 +1,250 @@
+Assolutamente. Ecco la guida completa e dettagliata, formattata come un vero e proprio file README, seguendo la struttura che hai definito. È pensata per essere esaustiva, chiara e facile da consultare.
+
+---
+
+# Guida alla Creazione di Scenari per D&D Battle Simulator
+
+## 1. Introduzione: Cos'è il File di Scenario
+
+Benvenuto nel D&D Battle Simulator! Questo strumento ti permette di creare e simulare combattimenti tattici di Dungeons & Dragons. Il cuore del simulatore è il file di scenario in formato JSON. Questo file di testo definisce ogni singolo elemento di una battaglia: dalla dimensione della mappa ai personaggi coinvolti, dai nemici agli ostacoli sul terreno, fino alle regole speciali dell'ambiente.
+
+Questa guida ti spiegherà, sezione per sezione, come scrivere il tuo file di scenario personalizzato da zero o come modificare quelli esistenti.
+
+---
+
+## 2. Struttura di Base del File
+
+Un file di scenario è un singolo oggetto JSON che contiene diverse sezioni chiave (chiamate "campi" o "proprietà"). Ecco una panoramica della sua struttura principale:
+
+```json
+{
+  "battle_id": "...",
+  "grid_size": { ... },
+  "environment_description": "...",
+  "terrain_features": [ ... ],
+  "player_characters": [ ... ],
+  "enemies": [ ... ]
+}
+```
+
+-   **`battle_id`**: Un nome identificativo per la tua battaglia (es. "Fuga dalla Cripta").
+-   **`grid_size`**: Le dimensioni della griglia di gioco.
+-   **`environment_description`**: Un testo descrittivo per dare atmosfera alla scena.
+-   **`terrain_features`**: Elementi speciali sulla mappa come trappole, terreno difficile o zone di oscurità.
+-   **`player_characters`**: La lista dei personaggi controllati dal giocatore.
+-   **`enemies`**: La lista dei nemici controllati dall'intelligenza artificiale.
+
+---
+
+## 3. Definire l'Ambiente di Battaglia
+
+Questa sezione definisce le caratteristiche fisiche e generali del campo di battaglia.
+
+-   **`grid_size` (Obbligatorio)**
+    -   **Scopo:** Imposta le dimensioni della mappa in numero di caselle.
+    -   **Sintassi:** Un oggetto con due campi numerici: `width` (larghezza) e `height` (altezza).
+    -   **Esempio:**
+        ```json
+        "grid_size": { "width": 20, "height": 15 }
+        ```
+
+-   **`environment_description` (Opzionale)**
+    -   **Scopo:** Fornisce un testo descrittivo per l'ambientazione.
+    -   **Sintassi:** Una stringa di testo.
+    -   **Esempio:**
+        ```json
+        "environment_description": "Una cripta umida e buia, con colonne di pietra e pozze d'acqua stagnante. Un odore di morte impregna l'aria."
+        ```
+
+---
+
+## 4. Creare un Combattente (Giocatori e Nemici)
+
+Sia i personaggi in `player_characters` che in `enemies` sono definiti da un oggetto con una struttura quasi identica.
+
+#### 4.1: Identità
+Definisce le informazioni base del combattente.
+
+-   `id`: (Stringa) Un ID unico per il token sulla mappa. Deve essere diverso per ogni creatura. Es. `"PC-Garanzia"`, `"Goblin-1"`.
+-   `name`: (Stringa) Il nome visualizzato nell'interfaccia. Es. `"Garanzia"`, `"Orco Feroce"`.
+-   `type`: (Stringa) **Fondamentale.** Deve essere **`"player"`** o **`"enemy"`**.
+-   `race`, `class`, `level`: (Stringa/Numero) Campi descrittivi.
+-   `position`: (Array di 2 Numeri) Le coordinate di partenza `[x, y]`.
+
+```json
+"id": "PC-Garanzia", 
+"name": "Garanzia", 
+"type": "player", 
+"race": "Mezzorco", 
+"class": "Monaco", 
+"level": 5,
+"position": [2, 7]
+```
+
+#### 4.2: Statistiche di Base
+Le sei caratteristiche e il bonus di competenza. Il simulatore calcolerà automaticamente i modificatori.
+
+-   `stats`: (Oggetto) Contiene i punteggi delle sei caratteristiche.
+-   `proficiency_bonus`: (Numero) Il bonus di competenza del personaggio (es. `+2` per i livelli 1-4, `+3` per i livelli 5-8).
+
+```json
+"proficiency_bonus": 3,
+"stats": { "strength": 10, "dexterity": 15, "constitution": 14, "intelligence": 8, "wisdom": 15, "charisma": 12 }
+```
+
+#### 4.3: Statistiche di Combattimento
+I valori principali usati in combattimento.
+
+-   `hp_max`: (Numero) I Punti Ferita massimi.
+-   `ac`: (Numero) La Classe Armatura.
+-   `speed`: (Numero) La velocità di movimento in metri (verrà convertita in caselle dal simulatore, considerando 1.5m per casella).
+-   `saving_throw_proficiencies`: (Array di Stringhe) Indica in quali Tiri Salvezza il personaggio è competente. I valori possibili sono: `"strength"`, `"dexterity"`, `"constitution"`, `"intelligence"`, `"wisdom"`, `"charisma"`.
+
+```json
+"hp_max": 40,
+"ac": 14,
+"speed": 12,
+"saving_throw_proficiencies": ["strength", "dexterity"]
+```
+
+#### 4.4: Difese
+Definisce come un personaggio reagisce a certi tipi di danno o condizioni.
+
+-   `defenses`: (Oggetto)
+    -   `resistances`: (Array di Stringhe) Tipi di danno a cui si è resistenti (danno dimezzato).
+    -   `vulnerabilities`: (Array di Stringhe) Tipi di danno a cui si è vulnerabili (danno raddoppiato).
+    -   `immunities`: (Oggetto) Contiene `damage_types` (danno azzerato) e `conditions` (immunità a stati alterati).
+
+```json
+"defenses": { 
+  "resistances": ["fire", "poison"], 
+  "vulnerabilities": ["bludgeoning"], 
+  "immunities": { "damage_types": ["psychic"], "conditions": ["charmed"] } 
+}
+```
+
+#### 4.5: Attacchi
+Un array che definisce gli attacchi disponibili. **Importante:** per ora, il simulatore usa solo il **primo attacco** della lista come attacco principale.
+
+-   `attacks`: (Array di oggetti)
+    -   `name`: (Stringa) Il nome dell'attacco.
+    -   `attack_source_stat`: (Stringa) La caratteristica usata per il tiro per colpire (`strength` o `dexterity`).
+    -   `damage_source_stat`: (Stringa) La caratteristica usata per il bonus al danno.
+    -   `damage_dice`: (Stringa) Formato "XdY" (es. "1d8", "2d6").
+    -   `damage_type`: (Stringa) Il tipo di danno. Vedi l'**Indice dei Tipi di Danno** più avanti.
+
+```json
+"attacks": [{ 
+  "name": "Spadone", "type": "melee", 
+  "attack_source_stat": "strength", "damage_source_stat": "strength", 
+  "damage_dice": "2d6", "damage_type": "slashing" 
+}]
+```
+
+#### 4.6: Abilità Speciali (`features`)
+Un array che definisce le abilità uniche del personaggio che hanno un effetto meccanico.
+
+-   **Struttura di una Feature:**
+    -   `id`: (Stringa) L'identificatore che il codice riconosce.
+    -   `cost`: (Oggetto o `null`) Definisce il costo.
+        -   Per abilità passive/sempre attive: `null`.
+        -   Per abilità a uso limitato: `{ "type": "uses", "max_uses": 1 }`.
+
+*   **Indice delle `features` Implementate:**
+
+    *   **`extra_attack`**
+        -   **Effetto:** Permette di effettuare un secondo attacco quando si compie l'azione di Attacco.
+        -   **Sintassi:** `{ "id": "extra_attack", "name": "Attacco Extra", "source": "Classe", "cost": null }`
+
+    *   **`savage_attacks`**
+        -   **Effetto:** Quando si ottiene un colpo critico (20 naturale), si tira un dado di danno dell'arma una volta in più.
+        -   **Sintassi:** `{ "id": "savage_attacks", "name": "Attacchi Selvaggi", "source": "Mezzorco", "cost": null }`
+
+    *   **`relentless_endurance`**
+        -   **Effetto:** Una volta per battaglia, se si scende a 0 HP, si può scegliere di scendere invece a 1 HP.
+        -   **Sintassi:** `{ "id": "relentless_endurance", "name": "Tenacia Implacabile", "source": "Mezzorco", "cost": { "type": "uses", "max_uses": 1 } }`
+
+    *   **`darkvision`**
+        -   **Effetto:** Il personaggio non subisce svantaggio agli attacchi quando si trova in un'area con l'effetto `darkness`.
+        -   **Sintassi:** `{ "id": "darkvision", "name": "Scurovisione", "source": "Razza", "cost": null }`
+
+---
+
+## 5. Aggiungere Elementi sul Terreno (`terrain_features`)
+
+Questa sezione permette di aggiungere ostacoli e zone con effetti speciali alla mappa. È un array di oggetti, ciascuno con questa struttura:
+
+-   `id` e `name`: Identificativi.
+-   `positions`: Un array di coordinate `[x, y]` che compongono la zona.
+-   `effects`: Un array di oggetti che descrive i vari effetti attivi su quelle caselle.
+
+*   **Indice degli Effetti di Terreno Implementati:**
+
+    *   **`difficult_terrain`**: Raddoppia il costo del movimento.
+        ```json
+        { "type": "difficult_terrain", "description": "Il terreno scosceso rallenta il movimento." }
+        ```
+    *   **`hazardous_area`**: Infligge danni. Richiede un oggetto `rules` per specificare il danno.
+        ```json
+        {
+          "type": "hazardous_area",
+          "description": "Spuntoni aguzzi sul fondo.",
+          "rules": { "damage_dice": "2d6", "damage_type": "piercing" }
+        }
+        ```
+    *   **`darkness`**: Rende l'area oscurata, causando la condizione `Accecato` a chi non ha `darkvision`.
+        ```json
+        { "type": "darkness", "description": "L'assenza di luce rende l'area oscurata." }
+        ```
+
+---
+
+## 6. Profili di Intelligenza Artificiale (IA)
+
+Assegna un comportamento ai tuoi nemici tramite il campo `ai_profile`.
+
+-   **`still`**: Il nemico non si muove e non compie azioni. Perfetto per manichini o torrette.
+-   **`brute`**: Il nemico si muove verso il bersaglio più vicino e lo attacca. Se è troppo lontano, usa l'azione Scatto.
+-   **`defender`**: Difende un'area specifica.
+    -   **Richiede il campo `defense_area`**: Un array di 4 numeri `[x1, y1, x2, y2]` che definisce un rettangolo.
+    -   Se il bersaglio è nell'area, si comporta come un `brute`. Altrimenti, usa l'azione Schivata.
+
+*   **Da Implementare in Futuro:** `ranged` (per attaccanti a distanza), `support` (per guaritori o buffer).
+
+---
+
+## 7. Appendice: Indici di Riferimento
+
+#### Indice dei Tipi di Danno
+Usa queste stringhe per il campo `damage_type`:
+-   `bludgeoning` (contundente)
+-   `piercing` (perforante)
+-   `slashing` (tagliente)
+-   `fire` (fuoco)
+-   `cold` (freddo)
+-   `lightning` (fulmine)
+-   `thunder` (tuono)
+-   `acid` (acido)
+-   `poison` (veleno)
+-   `radiant` (radiante)
+-   `necrotic` (necrotico)
+-   `psychic` (psichico)
+-   `force` (forza)
+
+#### Indice delle Condizioni
+Usa queste stringhe nel campo `conditions` (attualmente senza effetti meccanici, ma strutturalmente pronto):
+-   `blinded` (accecato)
+-   `charmed` (affascinato)
+-   `deafened` (assordato)
+-   `frightened` (spaventato)
+-   `grappled` (afferrato)
+-   `incapacitated` (incapacitato)
+-   `invisible` (invisibile)
+-   `paralyzed` (paralizzato)
+-   `petrified` (pietrificato)
+-   `poisoned` (avvelenato)
+-   `prone` (prono)
+-   `restrained` (trattenuto)
+-   `stunned` (stordito)
+-   `unconscious` (incosciente)
+-   `exhaustion` (esaurimento)
