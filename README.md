@@ -1,2 +1,0 @@
-# DnD
-A DnD simulator
