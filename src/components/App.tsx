@@ -60,6 +60,27 @@ ${JSON_STRUCTURE_GUIDE}
 
 Rispondi solo ed esclusivamente con l'oggetto JSON grezzo, senza alcun testo aggiuntivo, commenti, o blocchi di codice markdown (\`\`\`json).`;
 
+// +++ NUOVA FUNZIONE HELPER PER CHIAMARE LA NOSTRA API +++
+async function callApi(type: 'chat' | 'generateJson', payload: any) {
+    const response = await fetch('/api/gemini', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, payload }),
+    });
+
+    if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || `Errore del server (${response.status})`);
+    }
+
+    return response.json();
+}
+
+// +++ NUOVA FUNZIONE HELPER PER ESTRARRE IL TESTO DALLA RISPOSTA DELL'API +++
+function getTextFromResponse(response: any): string {
+    return response?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+
 export const App = () => {
     const [state, setState] = useState<GameState>(initialGameState);
     const [appPhase, setAppPhase] = useState<AppPhase>('MAIN_MENU');
@@ -69,25 +90,16 @@ export const App = () => {
     const [pendingBattleData, setPendingBattleData] = useState<BattleData | null>(null);
     const [playerCharacter, setPlayerCharacter] = useState<Character | null>(null);
     const [skillCheckRequest, setSkillCheckRequest] = useState<SkillCheckRequest | null>(null);
-    
-    const chatRef = useRef<Chat | null>(null);
-    const aiRef = useRef<GoogleGenAI | null>(null);
+
+    //const chatRef = useRef<Chat | null>(null);
+    //const aiRef = useRef<GoogleGenAI | null>(null);
     const controller = useMemo(() => new GameController(setState), []);
 
+
     useEffect(() => {
-        try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
-            aiRef.current = ai;
-            chatRef.current = ai.chats.create({
-              model: 'gemini-2.5-flash-preview-04-17',
-              config: { systemInstruction: SYSTEM_INSTRUCTION },
-            });
-            const welcomeMessage: ChatMessage = { id: Date.now(), role: 'model', text: 'Benvenuto, avventuriero! Sono il tuo Dungeon Master. Descrivi il tuo personaggio, lo scenario che desideri, o lascia che sia io a creare un\'avventura per te. Preferisci una storia ricca di dialoghi, un\'esplorazione misteriosa o azione immediata?' };
-            setMessages([welcomeMessage]);
-        } catch(e) {
-            console.error(e);
-            setApiError('Errore: API KEY non configurata o non valida. Imposta la variabile d\'ambiente GEMINI_API_KEY per continuare.');
-        }
+        // La configurazione dell'API è ora gestita dal server, il frontend deve solo mostrare il messaggio di benvenuto.
+        const welcomeMessage: ChatMessage = { id: Date.now(), role: 'model', text: 'Benvenuto, avventuriero! Sono il tuo Dungeon Master. Descrivi il tuo personaggio, lo scenario che desideri, o lascia che sia io a creare un\'avventura per te. Preferisci una storia ricca di dialoghi, un\'esplorazione misteriosa o azione immediata?' };
+        setMessages([welcomeMessage]);
     }, []);
 
     useEffect(() => {
@@ -101,55 +113,38 @@ export const App = () => {
         setAppPhase('BATTLE');
     };
     
+    // +++ FUNZIONE MODIFICATA +++
     const createPlayerCharacter = async (userMessage: ChatMessage) => {
         try {
-            if (!aiRef.current) return;
-            // Build history with the welcome message and the user's description.
-            // This is safe from stale state as `messages[0]` is constant and `userMessage` is passed in.
             const history = messages
                 .slice(0, 1)
                 .concat(userMessage)
-                .filter(m => m.role === 'user' || m.role === 'model') // good practice
                 .map(m => ({
                     role: m.role as 'user' | 'model',
                     parts: [{ text: m.text }]
                 }));
 
-            const response = await aiRef.current.models.generateContent({
-                model: 'gemini-2.5-flash-preview-04-17',
-                contents: [...history, { role: 'user', parts: [{ text: PLAYER_JSON_PROMPT }] }],
-            });
+            const response = await callApi('generateJson', { history, prompt: PLAYER_JSON_PROMPT });
+            let jsonStr = getTextFromResponse(response);
             
-            let jsonStr = response.text;
             const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
             const match = jsonStr.match(fenceRegex);
-            if (match && match[2]) {
-                jsonStr = match[2].trim();
-            }
+            if (match && match[2]) jsonStr = match[2].trim();
 
             const playerDataArray: CharacterData[] = JSON.parse(jsonStr);
             if(playerDataArray && playerDataArray.length > 0) {
-                 // Assicurati che il tipo sia 'player'
                 playerDataArray[0].type = 'player';
                 const character = new Character(playerDataArray[0]);
                 setPlayerCharacter(character);
             }
         } catch(e) {
             console.error("Failed to parse or fetch Player Character JSON:", e);
-            let errorText = "Si è verificato un errore nella creazione del personaggio. Riprova la tua descrizione.";
-            if (e instanceof Error) {
-                if (e.message.includes('quota exceeded')) {
-                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Riprova domani.';
-                } else if (e.message.includes('API key not valid')) {
-                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
-                } else if (e instanceof SyntaxError) {
-                     errorText = 'Il DM ha fornito una risposta non valida per il personaggio. Riprova la tua descrizione.';
-                }
-            }
+            const errorText = e instanceof Error ? e.message : "Si è verificato un errore nella creazione del personaggio.";
             setApiError(errorText);
         }
     };
 
+    // +++ FUNZIONE MODIFICATA +++
     const prepareBattle = async () => {
         setIsLoading(true);
         const preparingMessage: ChatMessage = {id: Date.now(), role: 'model', text: 'Il Dungeon Master sta preparando il campo di battaglia...'};
@@ -157,27 +152,16 @@ export const App = () => {
     
         let jsonStr = '';
         try {
-            if (!aiRef.current) return;
-            // The AI gets the full history to generate the battle scenario
             const history = messages
                 .filter(m => (m.role === 'user' || m.role === 'model'))
-                .map(m => ({
-                    role: m.role,
-                    parts: [{ text: m.text }]
-                }));
-
-            const response = await aiRef.current.models.generateContent({
-                model: 'gemini-2.5-flash-preview-04-17',
-                // We send a clean history without the battle prompt, just like a user would chat
-                contents: [...history, { role: 'user', parts: [{ text: BATTLE_JSON_PROMPT }] }]
-            });
+                .map(m => ({ role: m.role, parts: [{ text: m.text }] }));
             
-            jsonStr = response.text;
+            const response = await callApi('generateJson', { history, prompt: BATTLE_JSON_PROMPT });
+            jsonStr = getTextFromResponse(response);
+
             const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
             const match = jsonStr.match(fenceRegex);
-            if (match && match[2]) {
-                jsonStr = match[2].trim();
-            }
+            if (match && match[2]) jsonStr = match[2].trim();
     
             const battleData = JSON.parse(jsonStr);
 
@@ -192,54 +176,45 @@ export const App = () => {
             }
 
             setPendingBattleData(battleData);
-            setMessages(prev => prev.filter(m => m.id !== preparingMessage.id));
         } catch(e) {
             console.error("Failed to parse or fetch battle JSON:", e, "Received:", jsonStr);
-            let errorText = 'C\'è stato un errore nella generazione dello scenario. Riprova a descrivere l\'azione che porta al combattimento.';
-             if (e instanceof Error) {
-                if (e.message.includes('quota exceeded')) {
-                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Riprova domani.';
-                } else if (e.message.includes('API key not valid')) {
-                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
-                } else if (e instanceof SyntaxError) {
-                     errorText = 'Il DM ha fornito uno scenario di battaglia non valido. Riprova a descrivere l\'azione che porta al combattimento.';
-                }
-            }
+            const errorText = e instanceof Error ? e.message : 'C\'è stato un errore nella generazione dello scenario.';
             setApiError(errorText);
-            setMessages(prev => prev.filter(m => m.id !== preparingMessage.id));
         } finally {
+            setMessages(prev => prev.filter(m => m.id !== preparingMessage.id));
             setIsLoading(false);
         }
     };
     
+    // +++ FUNZIONE MODIFICATA +++
     const handleSendMessage = async (text: string) => {
-        if (!chatRef.current || isLoading) return;
+        if (isLoading) return;
     
         const isFirstUserMessage = messages.length === 1;
         setIsLoading(true);
         const userMessage: ChatMessage = { id: Date.now(), role: 'user', text };
-        const modelThinkingMessage: ChatMessage = { id: Date.now() + 1, role: 'model' as const, text: '' };
-        setMessages([...messages, userMessage, modelThinkingMessage]);
-    
+        setMessages(prev => [...prev, userMessage]);
+        
         try {
-            const stream = await chatRef.current.sendMessageStream({ message: text });
-            let fullResponse = '';
-            for await (const chunk of stream) {
-                fullResponse += chunk.text;
-                setMessages(prev => {
-                    const updated = [...prev];
-                    const lastMessage = updated[updated.length - 1];
-                    if (lastMessage && lastMessage.id === modelThinkingMessage.id) {
-                        lastMessage.text = fullResponse;
-                    }
-                    return updated;
-                });
-            }
-    
+            // Prepara lo storico per la chiamata API
+            const historyForApi: History[] = messages.map(m => ({ role: m.role, parts: [{ text: m.text }]}));
+
+            const response = await callApi('chat', {
+                history: historyForApi,
+                newMessage: text,
+                systemInstruction: SYSTEM_INSTRUCTION
+            });
+
+            const fullResponse = getTextFromResponse(response);
+            const modelResponseMessage: ChatMessage = { id: Date.now() + 1, role: 'model', text: fullResponse };
+
+            setMessages(prev => [...prev, modelResponseMessage]);
+
             if (isFirstUserMessage) {
                 await createPlayerCharacter(userMessage);
             }
-    
+            
+            // Gestione delle azioni JSON (invariata, ma ora agisce sulla risposta ricevuta)
             let actionProcessed = false;
             try {
                 const jsonActionRegex = /(\{[\s\S]*?"action":\s*"(?:START_BATTLE|REQUEST_ROLL)"[\s\S]*?\})/;
@@ -250,27 +225,17 @@ export const App = () => {
                     const textWithoutAction = fullResponse.substring(0, match.index).trim();
     
                     if (jsonPayload.action === 'REQUEST_ROLL' && jsonPayload.skill && SKILLS.includes(jsonPayload.skill)) {
-                        const skill = jsonPayload.skill as Skill;
-                        setSkillCheckRequest({ skill });
+                        setSkillCheckRequest({ skill: jsonPayload.skill as Skill });
                         setMessages(prev => {
                             const updated = [...prev];
-                            const lastMessage = updated[updated.length - 1];
-                            if (lastMessage) {
-                                lastMessage.text = textWithoutAction;
-                                const skillName = skill.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-                                lastMessage.text += `\n\n*(Tira un D20 per una prova di ${skillName}.)*`;
-                            }
+                            updated[updated.length - 1].text = textWithoutAction + `\n\n*(Tira un D20 per una prova di ${jsonPayload.skill.replace(/_/g, ' ')}.)*`;
                             return updated;
                         });
-                        setIsLoading(false);
                         actionProcessed = true;
                     } else if (jsonPayload.action === 'START_BATTLE') {
                         setMessages(prev => {
                             const updated = [...prev];
-                            const lastMessage = updated[updated.length - 1];
-                            if (lastMessage) {
-                                lastMessage.text = textWithoutAction;
-                            }
+                            updated[updated.length - 1].text = textWithoutAction;
                             return updated;
                         });
                         await prepareBattle();
@@ -278,180 +243,88 @@ export const App = () => {
                     }
                 }
             } catch (e) {
-                console.warn("Could not parse potential action JSON from model response.", e);
+                console.warn("Could not parse potential action JSON.", e);
             }
-    
-            if (!actionProcessed) {
-                setIsLoading(false);
-            }
-
+            
         } catch (e) {
             console.error(e);
-            let errorText = 'Si è verificato un errore sconosciuto durante la comunicazione con il DM.';
-            if (e instanceof Error) {
-                if (e.message.includes('quota exceeded')) {
-                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Hai raggiunto il limite di richieste per questo modello. Riprova domani.';
-                } else if (e.message.includes('API key not valid')) {
-                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
-                } else {
-                    errorText = `Errore di comunicazione con il DM: ${e.message}`;
-                }
-            }
+            const errorText = e instanceof Error ? e.message : 'Si è verificato un errore sconosciuto.';
             setApiError(errorText);
-
-            setMessages(prev => {
-                return prev.filter(m => m.id !== modelThinkingMessage.id);
-            });
+        } finally {
             setIsLoading(false);
         }
     };
     
+    // +++ FUNZIONE MODIFICATA +++
     const handleNarrativeRoll = async (_dieType: number, rolls: number[]) => {
-        if (!skillCheckRequest || !playerCharacter || !chatRef.current) return;
+        if (!skillCheckRequest || !playerCharacter || isLoading) return;
     
         const roll = rolls[0];
         const modifier = playerCharacter.getSkillModifier(skillCheckRequest.skill);
         const total = roll + modifier;
         const skillName = skillCheckRequest.skill.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
     
-        const rollMessage: ChatMessage = {
-            id: Date.now(),
-            role: 'roll',
-            text: `Prova di ${skillName}: ${total} (Dado: ${roll}, Mod: ${modifier >= 0 ? '+' : ''}${modifier})`
-        };
+        const rollMessage: ChatMessage = { id: Date.now(), role: 'roll', text: `Prova di ${skillName}: ${total} (Dado: ${roll}, Mod: ${modifier >= 0 ? '+' : ''}${modifier})` };
         
         setSkillCheckRequest(null);
         setIsLoading(true);
-        const modelThinkingMessage: ChatMessage = { id: Date.now() + 1, role: 'model' as const, text: '' };
-        setMessages(prev => [...prev, rollMessage, modelThinkingMessage]);
+        setMessages(prev => [...prev, rollMessage]);
     
         const resultTextForAI = `Il risultato della prova di ${skillName} è ${total}.`;
         
         try {
-            const stream = await chatRef.current.sendMessageStream({ message: resultTextForAI });
-            let fullResponse = '';
-            for await (const chunk of stream) {
-                fullResponse += chunk.text;
-                setMessages(prev => {
-                    const updated = [...prev];
-                    const lastMessage = updated[updated.length - 1];
-                    if (lastMessage && lastMessage.id === modelThinkingMessage.id) {
-                        lastMessage.text = fullResponse;
-                    }
-                    return updated;
-                });
-            }
+            // Costruiamo lo storico includendo il messaggio del tiro
+            const historyForApi: History[] = [...messages, rollMessage].map(m => ({ role: m.role, parts: [{ text: m.text }]}));
+
+            const response = await callApi('chat', {
+                history: historyForApi,
+                newMessage: resultTextForAI,
+                systemInstruction: SYSTEM_INSTRUCTION
+            });
+
+            const fullResponse = getTextFromResponse(response);
+            const modelResponseMessage: ChatMessage = { id: Date.now() + 1, role: 'model', text: fullResponse };
+            setMessages(prev => [...prev, modelResponseMessage]);
+            
         } catch (e) {
              console.error(e);
-             let errorText = 'Errore nel processare il risultato del tiro.';
-             if (e instanceof Error) {
-                if (e.message.includes('quota exceeded')) {
-                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Riprova domani.';
-                } else if (e.message.includes('API key not valid')) {
-                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
-                }
-            }
-            setApiError(errorText);
-             setMessages(prev => {
-                return prev.filter(m => m.id !== modelThinkingMessage.id);
-             });
+             const errorText = e instanceof Error ? e.message : 'Errore nel processare il risultato del tiro.';
+             setApiError(errorText);
         } finally {
             setIsLoading(false);
         }
     };
 
+    // +++ FUNZIONE MODIFICATA +++
     const handleContinueNarrative = async (report: string) => {
-        // Preserve the player character's final state from the battle.
         const finalPlayerCharacter = controller.state.characters.find(c => c.type === 'player');
-        if (finalPlayerCharacter) {
-            setPlayerCharacter(finalPlayerCharacter.clone());
-        }
+        if (finalPlayerCharacter) setPlayerCharacter(finalPlayerCharacter.clone());
     
         controller.restartGame();
         setAppPhase('NARRATIVE');
-        
-        if (!chatRef.current) return;
-    
         setIsLoading(true);
-        // Add a "thinking" message directly, without showing the user's "report" message.
-        const modelThinkingMessage: ChatMessage = { id: Date.now(), role: 'model' as const, text: '' };
-        setMessages(prev => [...prev, modelThinkingMessage]);
         
-        const reportMessageForAI = `Il combattimento è terminato. Ecco il resoconto dettagliato (inclusi i log di battaglia per tua informazione, non mostrarli all'utente): ${report}. Basandoti su questo, continua la narrazione da dove era stata interrotta.`;
-    
+        const reportMessageForAI = `Il combattimento è terminato. Ecco il resoconto: ${report}. Continua la narrazione.`;
+        
         try {
-            const stream = await chatRef.current.sendMessageStream({ message: reportMessageForAI });
-            let fullResponse = '';
-            for await (const chunk of stream) {
-                fullResponse += chunk.text;
-                setMessages(prev => {
-                    const updated = [...prev];
-                    const lastMessage = updated[updated.length - 1];
-                    if (lastMessage && lastMessage.id === modelThinkingMessage.id) {
-                        lastMessage.text = fullResponse;
-                    }
-                    return updated;
-                });
-            }
-    
-            // Handle potential actions from the AI's response
-            let actionProcessed = false;
-            try {
-                const jsonActionRegex = /(\{[\s\S]*?"action":\s*"(?:START_BATTLE|REQUEST_ROLL)"[\s\S]*?\})/;
-                const match = fullResponse.match(jsonActionRegex);
-                
-                if (match && match[1] && match.index !== undefined) {
-                    const jsonPayload = JSON.parse(match[1]);
-                    const textWithoutAction = fullResponse.substring(0, match.index).trim();
-    
-                    if (jsonPayload.action === 'REQUEST_ROLL' && jsonPayload.skill && SKILLS.includes(jsonPayload.skill)) {
-                        const skill = jsonPayload.skill as Skill;
-                        setSkillCheckRequest({ skill });
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const lastMessage = updated[updated.length - 1];
-                            if (lastMessage) {
-                                lastMessage.text = textWithoutAction;
-                                const skillName = skill.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-                                lastMessage.text += `\n\n*(Tira un D20 per una prova di ${skillName}.)*`;
-                            }
-                            return updated;
-                        });
-                        actionProcessed = true;
-                    } else if (jsonPayload.action === 'START_BATTLE') {
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const lastMessage = updated[updated.length - 1];
-                            if (lastMessage) {
-                                lastMessage.text = textWithoutAction;
-                            }
-                            return updated;
-                        });
-                        await prepareBattle();
-                        actionProcessed = true;
-                    }
-                }
-            } catch (e) {
-                console.warn("Could not parse potential action JSON from model response after battle.", e);
-            }
-    
+            const historyForApi: History[] = messages.map(m => ({ role: m.role, parts: [{ text: m.text }] }));
+            
+            const response = await callApi('chat', {
+                history: historyForApi,
+                newMessage: reportMessageForAI,
+                systemInstruction: SYSTEM_INSTRUCTION
+            });
+            
+            const fullResponse = getTextFromResponse(response);
+            const modelResponseMessage: ChatMessage = { id: Date.now(), role: 'model', text: fullResponse };
+            setMessages(prev => [...prev, modelResponseMessage]);
+
+            // Qui potresti ri-aggiungere la logica per gestire un'azione JSON subito dopo la battaglia, se necessario.
+
         } catch (e) {
             console.error(e);
-            let errorText = 'Si è verificato un errore sconosciuto durante la comunicazione con il DM.';
-            if (e instanceof Error) {
-                if (e.message.includes('quota exceeded')) {
-                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Riprova domani.';
-                } else if (e.message.includes('API key not valid')) {
-                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
-                } else {
-                    errorText = `Errore di comunicazione con il DM: ${e.message}`;
-                }
-            }
+            const errorText = e instanceof Error ? e.message : 'Errore nella continuazione della narrativa.';
             setApiError(errorText);
-    
-            setMessages(prev => {
-                return prev.filter(m => m.id !== modelThinkingMessage.id);
-            });
         } finally {
             setIsLoading(false);
         }
