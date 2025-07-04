@@ -1,6 +1,21 @@
-// src/components/App.tsx (VERSIONE CORRETTA E DEBUGGATA)
+/**
+ * @license
+ * Copyright 2024 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { BattleScreen } from './BattleScreen';
 import { OutputScreen } from './OutputScreen';
 import { NarrativeScreen } from './NarrativeScreen';
@@ -8,8 +23,9 @@ import { MainMenuScreen } from './MainMenuScreen';
 import { CombatSetupScreen } from './CombatSetupScreen';
 import { ErrorToast } from './ErrorToast';
 import { initialGameState } from '../types';
-import type { GameState, AppPhase, ChatMessage, BattleData, CharacterData, SkillCheckRequest, Skill, History } from '../types';
+import type { GameState, AppPhase, ChatMessage, BattleData, CharacterData, SkillCheckRequest, Skill } from '../types';
 import { GameController } from '../controller/GameController';
+import { GoogleGenAI, Chat } from '@google/genai';
 import { JSON_STRUCTURE_GUIDE } from '../docs/JSON_GUIDE';
 import { Character } from '../models/Character';
 import { SKILLS } from '../types';
@@ -44,8 +60,7 @@ ${JSON_STRUCTURE_GUIDE}
 
 Rispondi solo ed esclusivamente con l'oggetto JSON grezzo, senza alcun testo aggiuntivo, commenti, o blocchi di codice markdown (\`\`\`json).`;
 
-
-// +++ FUNZIONE HELPER ROBUSTA PER CHIAMARE LA NOSTRA API +++
+// +++ NUOVA FUNZIONE HELPER PER CHIAMARE LA NOSTRA API +++
 async function callApi(type: 'chat' | 'generateJson', payload: any) {
     const response = await fetch('/api/gemini', {
         method: 'POST',
@@ -53,23 +68,12 @@ async function callApi(type: 'chat' | 'generateJson', payload: any) {
         body: JSON.stringify({ type, payload }),
     });
 
-    // Leggiamo la risposta come testo, SEMPRE.
-    const responseText = await response.text();
-
     if (!response.ok) {
-        // Se la risposta non è OK, lanciamo l'errore usando il testo della risposta.
-        // Questo ci darà un messaggio di errore chiaro (es. "Internal Server Error").
-        throw new Error(responseText || `Errore del server (${response.status})`);
+        const errorData = await response.json();
+        throw new Error(errorData.message || `Errore del server (${response.status})`);
     }
 
-    try {
-        // Solo se la risposta è OK, proviamo a fare il parse come JSON.
-        return JSON.parse(responseText);
-    } catch (e) {
-        // Se il parse fallisce anche se la risposta era OK, è un problema serio.
-        console.error("Risposta OK dal server ma non è un JSON valido:", responseText);
-        throw new Error("Il server ha inviato una risposta in un formato inaspettato.");
-    }
+    return response.json();
 }
 
 // +++ NUOVA FUNZIONE HELPER PER ESTRARRE IL TESTO DALLA RISPOSTA DELL'API +++
@@ -87,9 +91,13 @@ export const App = () => {
     const [playerCharacter, setPlayerCharacter] = useState<Character | null>(null);
     const [skillCheckRequest, setSkillCheckRequest] = useState<SkillCheckRequest | null>(null);
 
+    //const chatRef = useRef<Chat | null>(null);
+    //const aiRef = useRef<GoogleGenAI | null>(null);
     const controller = useMemo(() => new GameController(setState), []);
 
+
     useEffect(() => {
+        // La configurazione dell'API è ora gestita dal server, il frontend deve solo mostrare il messaggio di benvenuto.
         const welcomeMessage: ChatMessage = { id: Date.now(), role: 'model', text: 'Benvenuto, avventuriero! Sono il tuo Dungeon Master. Descrivi il tuo personaggio, lo scenario che desideri, o lascia che sia io a creare un\'avventura per te. Preferisci una storia ricca di dialoghi, un\'esplorazione misteriosa o azione immediata?' };
         setMessages([welcomeMessage]);
     }, []);
@@ -105,6 +113,7 @@ export const App = () => {
         setAppPhase('BATTLE');
     };
     
+    // +++ FUNZIONE MODIFICATA +++
     const createPlayerCharacter = async (userMessage: ChatMessage) => {
         try {
             const history = messages
@@ -135,6 +144,7 @@ export const App = () => {
         }
     };
 
+    // +++ FUNZIONE MODIFICATA +++
     const prepareBattle = async () => {
         setIsLoading(true);
         const preparingMessage: ChatMessage = {id: Date.now(), role: 'model', text: 'Il Dungeon Master sta preparando il campo di battaglia...'};
@@ -164,6 +174,7 @@ export const App = () => {
                     battleData.player_characters.unshift(updatedPCData);
                 }
             }
+
             setPendingBattleData(battleData);
         } catch(e) {
             console.error("Failed to parse or fetch battle JSON:", e, "Received:", jsonStr);
@@ -175,36 +186,35 @@ export const App = () => {
         }
     };
     
+    // +++ FUNZIONE MODIFICATA +++
     const handleSendMessage = async (text: string) => {
         if (isLoading) return;
     
         const isFirstUserMessage = messages.length === 1;
         setIsLoading(true);
-
         const userMessage: ChatMessage = { id: Date.now(), role: 'user', text };
-        const updatedMessages = [...messages, userMessage];
-        setMessages(updatedMessages);
+        setMessages(prev => [...prev, userMessage]);
         
         try {
-            const historyForApi: History[] = updatedMessages
-                .filter(m => m.role === 'user' || m.role === 'model')
-                .map(m => ({ role: m.role, parts: [{ text: m.text }]}));
+            // Prepara lo storico per la chiamata API
+            const historyForApi: History[] = messages.map(m => ({ role: m.role, parts: [{ text: m.text }]}));
 
             const response = await callApi('chat', {
                 history: historyForApi,
-                // Non serve più 'newMessage' perché è già nello storico
+                newMessage: text,
                 systemInstruction: SYSTEM_INSTRUCTION
             });
 
             const fullResponse = getTextFromResponse(response);
             const modelResponseMessage: ChatMessage = { id: Date.now() + 1, role: 'model', text: fullResponse };
-            
+
             setMessages(prev => [...prev, modelResponseMessage]);
 
             if (isFirstUserMessage) {
                 await createPlayerCharacter(userMessage);
             }
             
+            // Gestione delle azioni JSON (invariata, ma ora agisce sulla risposta ricevuta)
             let actionProcessed = false;
             try {
                 const jsonActionRegex = /(\{[\s\S]*?"action":\s*"(?:START_BATTLE|REQUEST_ROLL)"[\s\S]*?\})/;
@@ -237,7 +247,7 @@ export const App = () => {
             }
             
         } catch (e) {
-            console.error("Errore in handleSendMessage:", e);
+            console.error(e);
             const errorText = e instanceof Error ? e.message : 'Si è verificato un errore sconosciuto.';
             setApiError(errorText);
         } finally {
@@ -245,6 +255,7 @@ export const App = () => {
         }
     };
     
+    // +++ FUNZIONE MODIFICATA +++
     const handleNarrativeRoll = async (_dieType: number, rolls: number[]) => {
         if (!skillCheckRequest || !playerCharacter || isLoading) return;
     
@@ -257,18 +268,17 @@ export const App = () => {
         
         setSkillCheckRequest(null);
         setIsLoading(true);
-        const updatedMessages = [...messages, rollMessage];
-        setMessages(updatedMessages);
+        setMessages(prev => [...prev, rollMessage]);
     
         const resultTextForAI = `Il risultato della prova di ${skillName} è ${total}.`;
         
         try {
-            const historyForApi: History[] = updatedMessages
-                .filter(m => m.role === 'user' || m.role === 'model' || m.role === 'roll')
-                .map(m => ({ role: m.role, parts: [{ text: m.text }]}));
+            // Costruiamo lo storico includendo il messaggio del tiro
+            const historyForApi: History[] = [...messages, rollMessage].map(m => ({ role: m.role, parts: [{ text: m.text }]}));
 
             const response = await callApi('chat', {
                 history: historyForApi,
+                newMessage: resultTextForAI,
                 systemInstruction: SYSTEM_INSTRUCTION
             });
 
@@ -285,6 +295,7 @@ export const App = () => {
         }
     };
 
+    // +++ FUNZIONE MODIFICATA +++
     const handleContinueNarrative = async (report: string) => {
         const finalPlayerCharacter = controller.state.characters.find(c => c.type === 'player');
         if (finalPlayerCharacter) setPlayerCharacter(finalPlayerCharacter.clone());
@@ -307,6 +318,8 @@ export const App = () => {
             const fullResponse = getTextFromResponse(response);
             const modelResponseMessage: ChatMessage = { id: Date.now(), role: 'model', text: fullResponse };
             setMessages(prev => [...prev, modelResponseMessage]);
+
+            // Qui potresti ri-aggiungere la logica per gestire un'azione JSON subito dopo la battaglia, se necessario.
 
         } catch (e) {
             console.error(e);
