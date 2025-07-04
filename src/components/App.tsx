@@ -1,0 +1,498 @@
+/**
+ * @license
+ * Copyright 2024 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { BattleScreen } from './BattleScreen';
+import { OutputScreen } from './OutputScreen';
+import { NarrativeScreen } from './NarrativeScreen';
+import { MainMenuScreen } from './MainMenuScreen';
+import { CombatSetupScreen } from './CombatSetupScreen';
+import { ErrorToast } from './ErrorToast';
+import { initialGameState } from '../types';
+import type { GameState, AppPhase, ChatMessage, BattleData, CharacterData, SkillCheckRequest, Skill } from '../types';
+import { GameController } from '../controller/GameController';
+import { GoogleGenAI, Chat } from '@google/genai';
+import { JSON_STRUCTURE_GUIDE } from '../docs/JSON_GUIDE';
+import { Character } from '../models/Character';
+import { SKILLS } from '../types';
+
+const SYSTEM_INSTRUCTION = `Sei un Dungeon Master esperto per un gioco di ruolo testuale chiamato 'D&D Battle Simulator'. Il tuo obiettivo è creare un'esperienza di gioco collaborativa e avvincente in italiano.
+
+Le tue responsabilità principali sono:
+1.  **Storytelling Collaborativo**: La tua prima risposta DEVE essere narrativa. Basati sul prompt dell'utente per creare una scena, descrivere l'ambiente e impostare l'atmosfera. I primi scambi di messaggi servono a costruire la storia.
+2.  **Creazione del Personaggio**: L'utente potrebbe descrivere un personaggio. Interpreta la sua descrizione per definirne le caratteristiche. Se l'utente è vago (es. "sono un guerriero nano"), riempi tu i dettagli mancanti (statistiche, equipaggiamento, competenze nelle abilità, etc.) in modo creativo e coerente.
+3.  **Coerenza Narrativa**: Quando la storia sfocia in un combattimento, i nemici e l'ambiente che generi nel JSON di battaglia DEVONO essere coerenti con la narrazione che hai costruito. Esempi:
+    - Se hai descritto dei banditi su un'impalcatura, genera nemici con profilo 'ranged'.
+    - Se hai parlato di un artefatto custodito in un passaggio stretto, genera un nemico 'defender' a sua protezione.
+4.  **Richiesta di Prove di Abilità**: Durante la narrazione, quando il giocatore tenta un'azione con un esito incerto (es. persuadere una guardia, scalare un muro, borseggiare qualcuno), DEVI richiedere una prova di abilità. Per farlo, termina la tua risposta con un oggetto JSON speciale: \`{"action": "REQUEST_ROLL", "skill": "skill_name"}\`. "skill_name" deve essere una delle abilità valide (es. "persuasione", "atletica", "rapidita_di_mano"). Non aggiungere altro testo dopo questo oggetto.
+5.  **Innesco della Battaglia**: Quando la narrazione arriva a un punto di non ritorno e il combattimento è inevitabile, DEVI terminare la tua risposta e, nella riga successiva, generare solo ed esclusivamente l'oggetto JSON speciale: \`{"action": "START_BATTLE"}\`. Non aggiungere altro testo dopo questo oggetto.`;
+
+const PLAYER_JSON_PROMPT = `Basandoti sulla conversazione precedente, genera il JSON solo per il personaggio del giocatore (player_characters).
+DEVI seguire rigorosamente lo schema e le regole per un oggetto CharacterData definiti nella guida seguente.
+Popola il campo 'skill_proficiencies' con 3-4 abilità appropriate basate sulla classe e sulla descrizione del personaggio.
+Rispondi solo ed esclusivamente con l'array JSON grezzo (che contiene un singolo oggetto personaggio), senza alcun testo aggiuntivo, commenti, o blocchi di codice markdown (\`\`\`json).
+
+--- GUIDA ALLO SCHEMA JSON ---
+${JSON_STRUCTURE_GUIDE}
+--- FINE GUIDA ---`;
+
+
+const BATTLE_JSON_PROMPT = `Basandoti sulla conversazione precedente, genera il JSON completo per lo scenario di battaglia.
+DEVI seguire rigorosamente lo schema e le regole definite nella guida seguente.
+
+--- GUIDA ALLO SCHEMA JSON ---
+${JSON_STRUCTURE_GUIDE}
+--- FINE GUIDA ---
+
+Rispondi solo ed esclusivamente con l'oggetto JSON grezzo, senza alcun testo aggiuntivo, commenti, o blocchi di codice markdown (\`\`\`json).`;
+
+export const App = () => {
+    const [state, setState] = useState<GameState>(initialGameState);
+    const [appPhase, setAppPhase] = useState<AppPhase>('MAIN_MENU');
+    const [messages, setMessages] = useState<ChatMessage[]>([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [apiError, setApiError] = useState<string | null>(null);
+    const [pendingBattleData, setPendingBattleData] = useState<BattleData | null>(null);
+    const [playerCharacter, setPlayerCharacter] = useState<Character | null>(null);
+    const [skillCheckRequest, setSkillCheckRequest] = useState<SkillCheckRequest | null>(null);
+    
+    const chatRef = useRef<Chat | null>(null);
+    const aiRef = useRef<GoogleGenAI | null>(null);
+    const controller = useMemo(() => new GameController(setState), []);
+
+    useEffect(() => {
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+            aiRef.current = ai;
+            chatRef.current = ai.chats.create({
+              model: 'gemini-2.5-flash-preview-04-17',
+              config: { systemInstruction: SYSTEM_INSTRUCTION },
+            });
+            const welcomeMessage: ChatMessage = { id: Date.now(), role: 'model', text: 'Benvenuto, avventuriero! Sono il tuo Dungeon Master. Descrivi il tuo personaggio, lo scenario che desideri, o lascia che sia io a creare un\'avventura per te. Preferisci una storia ricca di dialoghi, un\'esplorazione misteriosa o azione immediata?' };
+            setMessages([welcomeMessage]);
+        } catch(e) {
+            console.error(e);
+            setApiError('Errore: API KEY non configurata o non valida. Imposta la variabile d\'ambiente GEMINI_API_KEY per continuare.');
+        }
+    }, []);
+
+    useEffect(() => {
+        if (state.phase === 'BATTLE_ENDED' && appPhase === 'BATTLE') {
+            setAppPhase('BATTLE_ENDED');
+        }
+    }, [state.phase, appPhase]);
+    
+    const handleStartBattle = (data: BattleData) => {
+        controller.loadBattle(data);
+        setAppPhase('BATTLE');
+    };
+    
+    const createPlayerCharacter = async (userMessage: ChatMessage) => {
+        try {
+            if (!aiRef.current) return;
+            // Build history with the welcome message and the user's description.
+            // This is safe from stale state as `messages[0]` is constant and `userMessage` is passed in.
+            const history = messages
+                .slice(0, 1)
+                .concat(userMessage)
+                .filter(m => m.role === 'user' || m.role === 'model') // good practice
+                .map(m => ({
+                    role: m.role as 'user' | 'model',
+                    parts: [{ text: m.text }]
+                }));
+
+            const response = await aiRef.current.models.generateContent({
+                model: 'gemini-2.5-flash-preview-04-17',
+                contents: [...history, { role: 'user', parts: [{ text: PLAYER_JSON_PROMPT }] }],
+            });
+            
+            let jsonStr = response.text;
+            const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
+            const match = jsonStr.match(fenceRegex);
+            if (match && match[2]) {
+                jsonStr = match[2].trim();
+            }
+
+            const playerDataArray: CharacterData[] = JSON.parse(jsonStr);
+            if(playerDataArray && playerDataArray.length > 0) {
+                 // Assicurati che il tipo sia 'player'
+                playerDataArray[0].type = 'player';
+                const character = new Character(playerDataArray[0]);
+                setPlayerCharacter(character);
+            }
+        } catch(e) {
+            console.error("Failed to parse or fetch Player Character JSON:", e);
+            let errorText = "Si è verificato un errore nella creazione del personaggio. Riprova la tua descrizione.";
+            if (e instanceof Error) {
+                if (e.message.includes('quota exceeded')) {
+                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Riprova domani.';
+                } else if (e.message.includes('API key not valid')) {
+                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
+                } else if (e instanceof SyntaxError) {
+                     errorText = 'Il DM ha fornito una risposta non valida per il personaggio. Riprova la tua descrizione.';
+                }
+            }
+            setApiError(errorText);
+        }
+    };
+
+    const prepareBattle = async () => {
+        setIsLoading(true);
+        const preparingMessage: ChatMessage = {id: Date.now(), role: 'model', text: 'Il Dungeon Master sta preparando il campo di battaglia...'};
+        setMessages(prev => [...prev, preparingMessage]);
+    
+        let jsonStr = '';
+        try {
+            if (!aiRef.current) return;
+            // The AI gets the full history to generate the battle scenario
+            const history = messages
+                .filter(m => (m.role === 'user' || m.role === 'model'))
+                .map(m => ({
+                    role: m.role,
+                    parts: [{ text: m.text }]
+                }));
+
+            const response = await aiRef.current.models.generateContent({
+                model: 'gemini-2.5-flash-preview-04-17',
+                // We send a clean history without the battle prompt, just like a user would chat
+                contents: [...history, { role: 'user', parts: [{ text: BATTLE_JSON_PROMPT }] }]
+            });
+            
+            jsonStr = response.text;
+            const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
+            const match = jsonStr.match(fenceRegex);
+            if (match && match[2]) {
+                jsonStr = match[2].trim();
+            }
+    
+            const battleData = JSON.parse(jsonStr);
+
+            if (playerCharacter) {
+                const pcIndex = battleData.player_characters.findIndex((p: CharacterData) => p.id === playerCharacter.id);
+                const updatedPCData = JSON.parse(JSON.stringify(playerCharacter));
+                if (pcIndex !== -1) {
+                    battleData.player_characters[pcIndex] = updatedPCData;
+                } else {
+                    battleData.player_characters.unshift(updatedPCData);
+                }
+            }
+
+            setPendingBattleData(battleData);
+            setMessages(prev => prev.filter(m => m.id !== preparingMessage.id));
+        } catch(e) {
+            console.error("Failed to parse or fetch battle JSON:", e, "Received:", jsonStr);
+            let errorText = 'C\'è stato un errore nella generazione dello scenario. Riprova a descrivere l\'azione che porta al combattimento.';
+             if (e instanceof Error) {
+                if (e.message.includes('quota exceeded')) {
+                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Riprova domani.';
+                } else if (e.message.includes('API key not valid')) {
+                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
+                } else if (e instanceof SyntaxError) {
+                     errorText = 'Il DM ha fornito uno scenario di battaglia non valido. Riprova a descrivere l\'azione che porta al combattimento.';
+                }
+            }
+            setApiError(errorText);
+            setMessages(prev => prev.filter(m => m.id !== preparingMessage.id));
+        } finally {
+            setIsLoading(false);
+        }
+    };
+    
+    const handleSendMessage = async (text: string) => {
+        if (!chatRef.current || isLoading) return;
+    
+        const isFirstUserMessage = messages.length === 1;
+        setIsLoading(true);
+        const userMessage: ChatMessage = { id: Date.now(), role: 'user', text };
+        const modelThinkingMessage: ChatMessage = { id: Date.now() + 1, role: 'model' as const, text: '' };
+        setMessages([...messages, userMessage, modelThinkingMessage]);
+    
+        try {
+            const stream = await chatRef.current.sendMessageStream({ message: text });
+            let fullResponse = '';
+            for await (const chunk of stream) {
+                fullResponse += chunk.text;
+                setMessages(prev => {
+                    const updated = [...prev];
+                    const lastMessage = updated[updated.length - 1];
+                    if (lastMessage && lastMessage.id === modelThinkingMessage.id) {
+                        lastMessage.text = fullResponse;
+                    }
+                    return updated;
+                });
+            }
+    
+            if (isFirstUserMessage) {
+                await createPlayerCharacter(userMessage);
+            }
+    
+            let actionProcessed = false;
+            try {
+                const jsonActionRegex = /(\{[\s\S]*?"action":\s*"(?:START_BATTLE|REQUEST_ROLL)"[\s\S]*?\})/;
+                const match = fullResponse.match(jsonActionRegex);
+                
+                if (match && match[1] && match.index !== undefined) {
+                    const jsonPayload = JSON.parse(match[1]);
+                    const textWithoutAction = fullResponse.substring(0, match.index).trim();
+    
+                    if (jsonPayload.action === 'REQUEST_ROLL' && jsonPayload.skill && SKILLS.includes(jsonPayload.skill)) {
+                        const skill = jsonPayload.skill as Skill;
+                        setSkillCheckRequest({ skill });
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const lastMessage = updated[updated.length - 1];
+                            if (lastMessage) {
+                                lastMessage.text = textWithoutAction;
+                                const skillName = skill.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                                lastMessage.text += `\n\n*(Tira un D20 per una prova di ${skillName}.)*`;
+                            }
+                            return updated;
+                        });
+                        setIsLoading(false);
+                        actionProcessed = true;
+                    } else if (jsonPayload.action === 'START_BATTLE') {
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const lastMessage = updated[updated.length - 1];
+                            if (lastMessage) {
+                                lastMessage.text = textWithoutAction;
+                            }
+                            return updated;
+                        });
+                        await prepareBattle();
+                        actionProcessed = true;
+                    }
+                }
+            } catch (e) {
+                console.warn("Could not parse potential action JSON from model response.", e);
+            }
+    
+            if (!actionProcessed) {
+                setIsLoading(false);
+            }
+
+        } catch (e) {
+            console.error(e);
+            let errorText = 'Si è verificato un errore sconosciuto durante la comunicazione con il DM.';
+            if (e instanceof Error) {
+                if (e.message.includes('quota exceeded')) {
+                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Hai raggiunto il limite di richieste per questo modello. Riprova domani.';
+                } else if (e.message.includes('API key not valid')) {
+                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
+                } else {
+                    errorText = `Errore di comunicazione con il DM: ${e.message}`;
+                }
+            }
+            setApiError(errorText);
+
+            setMessages(prev => {
+                return prev.filter(m => m.id !== modelThinkingMessage.id);
+            });
+            setIsLoading(false);
+        }
+    };
+    
+    const handleNarrativeRoll = async (_dieType: number, rolls: number[]) => {
+        if (!skillCheckRequest || !playerCharacter || !chatRef.current) return;
+    
+        const roll = rolls[0];
+        const modifier = playerCharacter.getSkillModifier(skillCheckRequest.skill);
+        const total = roll + modifier;
+        const skillName = skillCheckRequest.skill.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    
+        const rollMessage: ChatMessage = {
+            id: Date.now(),
+            role: 'roll',
+            text: `Prova di ${skillName}: ${total} (Dado: ${roll}, Mod: ${modifier >= 0 ? '+' : ''}${modifier})`
+        };
+        
+        setSkillCheckRequest(null);
+        setIsLoading(true);
+        const modelThinkingMessage: ChatMessage = { id: Date.now() + 1, role: 'model' as const, text: '' };
+        setMessages(prev => [...prev, rollMessage, modelThinkingMessage]);
+    
+        const resultTextForAI = `Il risultato della prova di ${skillName} è ${total}.`;
+        
+        try {
+            const stream = await chatRef.current.sendMessageStream({ message: resultTextForAI });
+            let fullResponse = '';
+            for await (const chunk of stream) {
+                fullResponse += chunk.text;
+                setMessages(prev => {
+                    const updated = [...prev];
+                    const lastMessage = updated[updated.length - 1];
+                    if (lastMessage && lastMessage.id === modelThinkingMessage.id) {
+                        lastMessage.text = fullResponse;
+                    }
+                    return updated;
+                });
+            }
+        } catch (e) {
+             console.error(e);
+             let errorText = 'Errore nel processare il risultato del tiro.';
+             if (e instanceof Error) {
+                if (e.message.includes('quota exceeded')) {
+                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Riprova domani.';
+                } else if (e.message.includes('API key not valid')) {
+                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
+                }
+            }
+            setApiError(errorText);
+             setMessages(prev => {
+                return prev.filter(m => m.id !== modelThinkingMessage.id);
+             });
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleContinueNarrative = async (report: string) => {
+        // Preserve the player character's final state from the battle.
+        const finalPlayerCharacter = controller.state.characters.find(c => c.type === 'player');
+        if (finalPlayerCharacter) {
+            setPlayerCharacter(finalPlayerCharacter.clone());
+        }
+    
+        controller.restartGame();
+        setAppPhase('NARRATIVE');
+        
+        if (!chatRef.current) return;
+    
+        setIsLoading(true);
+        // Add a "thinking" message directly, without showing the user's "report" message.
+        const modelThinkingMessage: ChatMessage = { id: Date.now(), role: 'model' as const, text: '' };
+        setMessages(prev => [...prev, modelThinkingMessage]);
+        
+        const reportMessageForAI = `Il combattimento è terminato. Ecco il resoconto dettagliato (inclusi i log di battaglia per tua informazione, non mostrarli all'utente): ${report}. Basandoti su questo, continua la narrazione da dove era stata interrotta.`;
+    
+        try {
+            const stream = await chatRef.current.sendMessageStream({ message: reportMessageForAI });
+            let fullResponse = '';
+            for await (const chunk of stream) {
+                fullResponse += chunk.text;
+                setMessages(prev => {
+                    const updated = [...prev];
+                    const lastMessage = updated[updated.length - 1];
+                    if (lastMessage && lastMessage.id === modelThinkingMessage.id) {
+                        lastMessage.text = fullResponse;
+                    }
+                    return updated;
+                });
+            }
+    
+            // Handle potential actions from the AI's response
+            let actionProcessed = false;
+            try {
+                const jsonActionRegex = /(\{[\s\S]*?"action":\s*"(?:START_BATTLE|REQUEST_ROLL)"[\s\S]*?\})/;
+                const match = fullResponse.match(jsonActionRegex);
+                
+                if (match && match[1] && match.index !== undefined) {
+                    const jsonPayload = JSON.parse(match[1]);
+                    const textWithoutAction = fullResponse.substring(0, match.index).trim();
+    
+                    if (jsonPayload.action === 'REQUEST_ROLL' && jsonPayload.skill && SKILLS.includes(jsonPayload.skill)) {
+                        const skill = jsonPayload.skill as Skill;
+                        setSkillCheckRequest({ skill });
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const lastMessage = updated[updated.length - 1];
+                            if (lastMessage) {
+                                lastMessage.text = textWithoutAction;
+                                const skillName = skill.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                                lastMessage.text += `\n\n*(Tira un D20 per una prova di ${skillName}.)*`;
+                            }
+                            return updated;
+                        });
+                        actionProcessed = true;
+                    } else if (jsonPayload.action === 'START_BATTLE') {
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const lastMessage = updated[updated.length - 1];
+                            if (lastMessage) {
+                                lastMessage.text = textWithoutAction;
+                            }
+                            return updated;
+                        });
+                        await prepareBattle();
+                        actionProcessed = true;
+                    }
+                }
+            } catch (e) {
+                console.warn("Could not parse potential action JSON from model response after battle.", e);
+            }
+    
+        } catch (e) {
+            console.error(e);
+            let errorText = 'Si è verificato un errore sconosciuto durante la comunicazione con il DM.';
+            if (e instanceof Error) {
+                if (e.message.includes('quota exceeded')) {
+                    errorText = 'Chiamata all\'API Gemini fallita: quota giornaliera superata. Riprova domani.';
+                } else if (e.message.includes('API key not valid')) {
+                    errorText = 'La chiave API non è valida. Controlla la tua configurazione.';
+                } else {
+                    errorText = `Errore di comunicazione con il DM: ${e.message}`;
+                }
+            }
+            setApiError(errorText);
+    
+            setMessages(prev => {
+                return prev.filter(m => m.id !== modelThinkingMessage.id);
+            });
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const triggerStartBattle = () => {
+        if (pendingBattleData) {
+            handleStartBattle(pendingBattleData);
+            setPendingBattleData(null);
+        }
+    };
+
+    const renderScreen = () => {
+        switch(appPhase) {
+            case 'MAIN_MENU':
+                return <MainMenuScreen onSelectPhase={setAppPhase} />;
+            case 'COMBAT_SETUP':
+                return <CombatSetupScreen onStartBattle={handleStartBattle} />;
+            case 'NARRATIVE':
+                return <NarrativeScreen 
+                            messages={messages} 
+                            onSend={handleSendMessage} 
+                            isLoading={isLoading} 
+                            onStartBattle={pendingBattleData ? triggerStartBattle : undefined} 
+                            playerCharacter={playerCharacter}
+                            skillCheckRequest={skillCheckRequest}
+                            onNarrativeRoll={handleNarrativeRoll}
+                        />;
+            case 'BATTLE':
+                 return <BattleScreen state={state} controller={controller} />;
+            case 'BATTLE_ENDED':
+                return <OutputScreen state={state} onContinue={handleContinueNarrative} />;
+            default:
+                return <div>Caricamento...</div>
+        }
+    };
+
+    return (
+        <div className="app-container">
+            {apiError && <ErrorToast message={apiError} onClose={() => setApiError(null)} />}
+            {renderScreen()}
+        </div>
+    );
+};
