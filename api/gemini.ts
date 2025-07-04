@@ -1,7 +1,7 @@
 // api/gemini.ts (NUOVO FILE DA CREARE)
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
 
 // Questa è la nostra unica API sicura.
 // Distinguiamo le azioni tramite `request.body.type`.
@@ -19,7 +19,7 @@ export default async function handler(
     return response.status(500).json({ message: "Configurazione del server incompleta." });
   }
 
-  const genAI = new GoogleGenAI(apiKey);
+  const genAI = new GoogleGenerativeAI(apiKey);
   
   // Impostazioni di sicurezza per Gemini
   const safetySettings = [
